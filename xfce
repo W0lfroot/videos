@@ -1,0 +1,121 @@
+#!/bin/sh
+
+# This script can only be run as root
+if [ "$(id -u)" != "0" ]; then
+  echo "This script must be run as root" 1>&2
+  exit 1
+fi
+
+# Enable community repository (required for some XFCE packages)
+if ! grep -q "^http.*/community$" /etc/apk/repositories; then
+    echo "http://dl-cdn.alpinelinux.org/alpine/v3.19/community" >> /etc/apk/repositories
+    apk update
+fi
+
+# Install XFCE and required packages (based on Alpine wiki)
+echo "Installing XFCE and required packages..."
+apk add --no-cache \
+    xorg-server-xephyr xwininfo dbus-x11 sudo \
+    xfce4 xfce4-terminal xfce4-screensaver \
+    lightdm-gtk-greeter font-dejavu \
+    onboard ttf-freefont \
+    adwaita-icon-theme desktop-file-utils \
+    xfce4-whiskermenu-plugin
+
+# Setup D-Bus (required for XFCE)
+if ! rc-service dbus status > /dev/null 2>&1; then
+    rc-service dbus start
+    rc-update add dbus
+fi
+
+# Create user 'alpine' if it doesn't exist
+if ! id -u alpine >/dev/null 2>&1; then
+    adduser -D alpine
+    echo "alpine:alpine" | chpasswd
+    adduser alpine wheel
+    echo "%wheel ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+fi
+
+# Add user to required groups for Xorg
+addgroup alpine input 2>/dev/null
+addgroup alpine video 2>/dev/null
+
+# Create XFCE config directory
+mkdir -p /home/alpine/.config/xfce4
+
+# Create a startup script for XFCE with touch optimizations
+cat > /home/alpine/.config/xfce4/startup.sh << 'EOF'
+#!/bin/sh
+
+# Start virtual keyboard for touchscreen
+onboard &
+
+# Set larger icons for touch (better for Kindle screen)
+xfconf-query -c xsettings -p /Gtk/IconSizes -s "gtk-large=48,48" 2>/dev/null
+
+# Disable animations for better performance on E Ink
+xfconf-query -c xfwm4 -p /general/use_compositing -s false 2>/dev/null
+
+# Set touch-friendly settings
+xfconf-query -c xsettings -p /Gtk/ButtonImages -s true 2>/dev/null
+xfconf-query -c xsettings -p /Gtk/MenuImages -s true 2>/dev/null
+
+# Start XFCE panel with larger size for touch
+xfconf-query -c xfce4-panel -p /panels/panel-1/size -s 48 2>/dev/null
+
+EOF
+
+chmod +x /home/alpine/.config/xfce4/startup.sh
+chown -R alpine:alpine /home/alpine/.config
+
+# Create a custom .xsession for XFCE
+cat > /home/alpine/.xsession << 'EOF'
+#!/bin/sh
+export DISPLAY=:1
+export XDG_RUNTIME_DIR=/tmp/runtime-alpine
+mkdir -p /tmp/runtime-alpine 2>/dev/null
+
+# Source XFCE startup
+. /etc/xdg/xfce4/xinitrc
+
+# Run custom startup script
+/home/alpine/.config/xfce4/startup.sh &
+
+exec xfce4-session
+EOF
+
+chmod +x /home/alpine/.xsession
+chown alpine:alpine /home/alpine/.xsession
+
+# Kill existing Xephyr if running
+if [ "$(pgrep Xephyr)" ] ; then
+    echo "Xephyr is already running. Killing it..."
+    kill $(pgrep Xephyr)
+    sleep 2
+fi
+
+# Get screen geometry and start Xephyr
+WINDOW_GEOMETRY=$(xwininfo -root -display :0 | egrep "geometry" | cut -d " " -f4)
+DISPLAY=:0 Xephyr :1 -title "L:D_N:application_ID:xephyr" -ac -br -screen $WINDOW_GEOMETRY -cc 4 -reset -terminate &
+sleep 3
+
+# Start XFCE session as alpine user
+su - alpine -c "
+export DISPLAY=:1
+export XDG_RUNTIME_DIR=/tmp/runtime-alpine
+mkdir -p /tmp/runtime-alpine 2>/dev/null
+
+# Run first-time setup if needed
+if [ ! -f /home/alpine/.runonce ]; then
+    touch /home/alpine/.runonce
+    echo 'XFCE first-time setup complete'
+    sleep 2
+fi
+
+exec xfce4-session
+"
+
+# Cleanup
+echo "Killing Xephyr..."
+kill $(pgrep Xephyr) 2>/dev/null
+sleep 2
