@@ -6,13 +6,25 @@ if [ "$(id -u)" != "0" ]; then
   exit 1
 fi
 
-# Install required packages if they are not already installed
-if [ -z "$(which Xephyr)" ] || [ -z "$(which xwininfo)" ]; then
-    echo "Installing required packages..."
-    apk add --no-cache xorg-server-xephyr xwininfo onboard dbus-x11 sudo mate-desktop-environment xfce4-terminal adwaita-icon-theme faenza-icon-theme font-dejavu
+# Enable community repository (required for openbox)
+if ! grep -q "^http.*/community$" /etc/apk/repositories; then
+    echo "http://dl-cdn.alpinelinux.org/alpine/v3.19/community" >> /etc/apk/repositories
+    apk update
 fi
 
-# Create a new user 'alpine' if it doesn't already exist
+# Install minimal required packages (following Alpine wiki)
+echo "Installing required packages..."
+apk add --no-cache xorg-server-xephyr xwininfo dbus-x11 sudo \
+    openbox xterm font-terminus \
+    onboard ttf-dejavu
+
+# Setup D-Bus (required for openbox)
+if ! rc-service dbus status > /dev/null 2>&1; then
+    rc-service dbus start
+    rc-update add dbus
+fi
+
+# Create user 'alpine' if it doesn't exist
 if ! id -u alpine >/dev/null 2>&1; then
     adduser -D alpine
     echo "alpine:alpine" | chpasswd
@@ -20,34 +32,78 @@ if ! id -u alpine >/dev/null 2>&1; then
     echo "%wheel ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 fi
 
-# Make dang sure Xephyr isn't already running
+# Add user to required groups for Xorg (from Alpine wiki)
+addgroup alpine input 2>/dev/null
+addgroup alpine video 2>/dev/null
+
+# Create Openbox config directories
+mkdir -p /home/alpine/.config/openbox
+
+# Copy default Openbox configs if they exist and not already present
+if [ -d /etc/xdg/openbox ] && [ ! -f /home/alpine/.config/openbox/rc.xml ]; then
+    cp -r /etc/xdg/openbox/* /home/alpine/.config/openbox/ 2>/dev/null
+fi
+
+# Create a minimal autostart file
+cat > /home/alpine/.config/openbox/autostart << 'EOF'
+# Start virtual keyboard for touchscreen
+onboard &
+
+# Set simple black background (saves resources)
+xsetroot -solid black &
+EOF
+
+# Create a simple menu.xml if it doesn't exist
+if [ ! -f /home/alpine/.config/openbox/menu.xml ]; then
+    cat > /home/alpine/.config/openbox/menu.xml << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu>
+<menu id="root-menu" label="Menu">
+  <item label="Terminal">
+    <action name="Execute"><command>xterm</command></action>
+  </item>
+  <item label="Web Browser">
+    <action name="Execute"><command>midori</command></action>
+  </item>
+  <separator />
+  <item label="Reconfigure">
+    <action name="Reconfigure" />
+  </item>
+</menu>
+</openbox_menu>
+EOF
+fi
+
+chown -R alpine:alpine /home/alpine/.config
+
+# Kill existing Xephyr if running
 if [ "$(pgrep Xephyr)" ] ; then
     echo "Xephyr is already running. Killing it..."
     kill $(pgrep Xephyr)
     sleep 2
 fi
 
-WINDOW_GEOMETRY=$(xwininfo -root -display :0 | egrep "geometry" | cut -d " "  -f4)
+# Get screen geometry and start Xephyr
+WINDOW_GEOMETRY=$(xwininfo -root -display :0 | egrep "geometry" | cut -d " " -f4)
 DISPLAY=:0 Xephyr :1 -title "L:D_N:application_ID:xephyr" -ac -br -screen $WINDOW_GEOMETRY -cc 4 -reset -terminate &
-sleep 2
+sleep 3
 
-# Drop into the Alpine user session
+# Start Openbox session as alpine user
 su - alpine -c "
 export DISPLAY=:1
+export XDG_RUNTIME_DIR=/tmp/runtime-alpine
+mkdir -p /tmp/runtime-alpine 2>/dev/null
 
+# Run first-time setup if needed
 if [ ! -f /home/alpine/.runonce ]; then
-    echo 'Running first-time setup...'
     touch /home/alpine/.runonce
-    gsettings set org.mate.interface window-scaling-factor 2
-    gsettings set org.mate.interface window-scaling-factor-qt-sync true
-
-    sleep 2
+    echo 'First-time setup complete'
 fi
 
-dbus-run-session mate-session
-" > /dev/null 2>&1
+exec openbox-session
+"
 
-# Cleanup:
+# Cleanup
 echo "Killing Xephyr..."
-kill $(pgrep Xephyr)
+kill $(pgrep Xephyr) 2>/dev/null
 sleep 2
